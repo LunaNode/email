@@ -13,6 +13,7 @@ import (
 	"net/mail"
 	"net/smtp"
 	"net/textproto"
+	"crypto/tls"
 	"os"
 	"path/filepath"
 	"strings"
@@ -193,7 +194,7 @@ func (e *Email) Bytes() ([]byte, error) {
 
 // Send an email using the given host and SMTP auth (optional), returns any error thrown by smtp.SendMail
 // This function merges the To, Cc, and Bcc fields and calls the smtp.SendMail function using the Email.Bytes() output as the message
-func (e *Email) Send(addr string, a smtp.Auth) error {
+func (e *Email) Send(host string, port int, a smtp.Auth, notls bool) error {
 	// Merge the To, Cc, and Bcc fields
 	to := make([]string, 0, len(e.To)+len(e.Cc)+len(e.Bcc))
 	to = append(append(append(to, e.To...), e.Cc...), e.Bcc...)
@@ -216,7 +217,55 @@ func (e *Email) Send(addr string, a smtp.Auth) error {
 	if err != nil {
 		return err
 	}
-	return smtp.SendMail(addr, a, from.Address, to, raw)
+	return SendMail(host, port, a, notls, from.Address, to, raw)
+}
+
+// SendMail connects to the server at addr, switches to TLS if
+// possible, authenticates with the optional mechanism a if possible,
+// and then sends an email from address from, to addresses to, with
+// message msg.
+func SendMail(host string, port int, a smtp.Auth, notls bool, from string, to []string, msg []byte) error {
+	c, err := smtp.Dial(fmt.Sprintf("%s:%d", host, port))
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	if !notls {
+		if ok, _ := c.Extension("STARTTLS"); ok {
+			config := &tls.Config{ServerName: host}
+			if err = c.StartTLS(config); err != nil {
+				return err
+			}
+		}
+	}
+	if a != nil {
+		if ok, _ := c.Extension("AUTH"); ok {
+			if err = c.Auth(a); err != nil {
+				return err
+			}
+		}
+	}
+	if err = c.Mail(from); err != nil {
+		return err
+	}
+	for _, addr := range to {
+		if err = c.Rcpt(addr); err != nil {
+			return err
+		}
+	}
+	w, err := c.Data()
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(msg)
+	if err != nil {
+		return err
+	}
+	err = w.Close()
+	if err != nil {
+		return err
+	}
+	return c.Quit()
 }
 
 // Attachment is a struct representing an email attachment.
